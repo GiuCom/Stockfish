@@ -1,6 +1,6 @@
 /*
   Stockfish, a UCI chess playing engine derived from Glaurung 2.1
-  Copyright (C) 2004-2023 The Stockfish developers (see AUTHORS file)
+  Copyright (C) 2004-2026 The Stockfish developers (see AUTHORS file)
 
   Stockfish is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -27,7 +27,8 @@
 #include <vector>
 
 namespace Stockfish {
-enum Value : int;
+
+class OptionsMap;
 
 using Range    = std::pair<int, int>;  // Option's min-max values
 using RangeFun = Range(int);
@@ -101,8 +102,7 @@ class Tune {
 
         static_assert(!std::is_const_v<T>, "Parameter cannot be const!");
 
-        static_assert(std::is_same_v<T, int> || std::is_same_v<T, Value>
-                        || std::is_same_v<T, PostUpdate>,
+        static_assert(std::is_same_v<T, int> || std::is_same_v<T, PostUpdate>,
                       "Parameter type not supported!");
 
         Entry(const std::string& n, T& v, const SetRange& r) :
@@ -145,6 +145,8 @@ class Tune {
         return add(value, (next(names), std::move(names)), args...);
     }
 
+    static void make_option(OptionsMap* options, const std::string& n, int v, const SetRange& r);
+
     std::vector<std::unique_ptr<EntryBase>> list;
 
    public:
@@ -153,23 +155,35 @@ class Tune {
         return instance().add(SetDefaultRange, names.substr(1, names.size() - 2),
                               args...);  // Remove trailing parenthesis
     }
-    static void init() {
+    static void init(OptionsMap& o) {
+        options = &o;
         for (auto& e : instance().list)
             e->init_option();
         read_options();
-    }  // Deferred, due to UCI::Options access
+    }  // Deferred, due to UCIEngine::Options access
     static void read_options() {
         for (auto& e : instance().list)
             e->read_option();
     }
-    static bool update_on_last;
+
+    static bool        update_on_last;
+    static OptionsMap* options;
 };
+
+template<typename... Args>
+constexpr void tune_check_args(Args&&...) {
+    static_assert((!std::is_fundamental_v<Args> && ...), "TUNE macro arguments wrong");
+}
 
 // Some macro magic :-) we define a dummy int variable that the compiler initializes calling Tune::add()
 #define STRINGIFY(x) #x
 #define UNIQUE2(x, y) x##y
 #define UNIQUE(x, y) UNIQUE2(x, y)  // Two indirection levels to expand __LINE__
-#define TUNE(...) int UNIQUE(p, __LINE__) = Tune::add(STRINGIFY((__VA_ARGS__)), __VA_ARGS__)
+#define TUNE(...) \
+    int UNIQUE(p, __LINE__) = []() -> int { \
+        tune_check_args(__VA_ARGS__); \
+        return Tune::add(STRINGIFY((__VA_ARGS__)), __VA_ARGS__); \
+    }();
 
 #define UPDATE_ON_LAST() bool UNIQUE(p, __LINE__) = Tune::update_on_last = true
 

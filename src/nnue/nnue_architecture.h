@@ -1,6 +1,6 @@
 /*
   Stockfish, a UCI chess playing engine derived from Glaurung 2.1
-  Copyright (C) 2004-2023 The Stockfish developers (see AUTHORS file)
+  Copyright (C) 2004-2026 The Stockfish developers (see AUTHORS file)
 
   Stockfish is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -26,6 +26,7 @@
 #include <iosfwd>
 
 #include "features/half_ka_v2_hm.h"
+#include "features/full_threats.h"
 #include "layers/affine_transform.h"
 #include "layers/affine_transform_sparse_input.h"
 #include "layers/clipped_relu.h"
@@ -35,16 +36,32 @@
 namespace Stockfish::Eval::NNUE {
 
 // Input features used in evaluation function
-using FeatureSet = Features::HalfKAv2_hm;
+using ThreatFeatureSet = Features::FullThreats;
+using PSQFeatureSet    = Features::HalfKAv2_hm;
 
 // Number of input feature dimensions after conversion
-constexpr IndexType TransformedFeatureDimensions = 2560;
-constexpr IndexType PSQTBuckets                  = 8;
-constexpr IndexType LayerStacks                  = 8;
+constexpr IndexType TransformedFeatureDimensionsBig = 1024;
+constexpr int       L2Big                           = 15;
+constexpr int       L3Big                           = 32;
 
-struct Network {
-    static constexpr int FC_0_OUTPUTS = 15;
-    static constexpr int FC_1_OUTPUTS = 32;
+constexpr IndexType TransformedFeatureDimensionsSmall = 128;
+constexpr int       L2Small                           = 15;
+constexpr int       L3Small                           = 32;
+
+constexpr IndexType PSQTBuckets = 8;
+constexpr IndexType LayerStacks = 8;
+
+// If vector instructions are enabled, we update and refresh the
+// accumulator tile by tile such that each tile fits in the CPU's
+// vector registers.
+static_assert(PSQTBuckets % 8 == 0,
+              "Per feature PSQT values cannot be processed at granularity lower than 8 at a time.");
+
+template<IndexType L1, int L2, int L3>
+struct NetworkArchitecture {
+    static constexpr IndexType TransformedFeatureDimensions = L1;
+    static constexpr int       FC_0_OUTPUTS                 = L2;
+    static constexpr int       FC_1_OUTPUTS                 = L3;
 
     Layers::AffineTransformSparseInput<TransformedFeatureDimensions, FC_0_OUTPUTS + 1> fc_0;
     Layers::SqrClippedReLU<FC_0_OUTPUTS + 1>                                           ac_sqr_0;
@@ -82,15 +99,15 @@ struct Network {
             && fc_2.write_parameters(stream);
     }
 
-    std::int32_t propagate(const TransformedFeatureType* transformedFeatures) {
+    std::int32_t propagate(const TransformedFeatureType* transformedFeatures) const {
         struct alignas(CacheLineSize) Buffer {
-            alignas(CacheLineSize) decltype(fc_0)::OutputBuffer fc_0_out;
-            alignas(CacheLineSize) decltype(ac_sqr_0)::OutputType
+            alignas(CacheLineSize) typename decltype(fc_0)::OutputBuffer fc_0_out;
+            alignas(CacheLineSize) typename decltype(ac_sqr_0)::OutputType
               ac_sqr_0_out[ceil_to_multiple<IndexType>(FC_0_OUTPUTS * 2, 32)];
-            alignas(CacheLineSize) decltype(ac_0)::OutputBuffer ac_0_out;
-            alignas(CacheLineSize) decltype(fc_1)::OutputBuffer fc_1_out;
-            alignas(CacheLineSize) decltype(ac_1)::OutputBuffer ac_1_out;
-            alignas(CacheLineSize) decltype(fc_2)::OutputBuffer fc_2_out;
+            alignas(CacheLineSize) typename decltype(ac_0)::OutputBuffer ac_0_out;
+            alignas(CacheLineSize) typename decltype(fc_1)::OutputBuffer fc_1_out;
+            alignas(CacheLineSize) typename decltype(ac_1)::OutputBuffer ac_1_out;
+            alignas(CacheLineSize) typename decltype(fc_2)::OutputBuffer fc_2_out;
 
             Buffer() { std::memset(this, 0, sizeof(*this)); }
         };
@@ -108,7 +125,7 @@ struct Network {
         ac_sqr_0.propagate(buffer.fc_0_out, buffer.ac_sqr_0_out);
         ac_0.propagate(buffer.fc_0_out, buffer.ac_0_out);
         std::memcpy(buffer.ac_sqr_0_out + FC_0_OUTPUTS, buffer.ac_0_out,
-                    FC_0_OUTPUTS * sizeof(decltype(ac_0)::OutputType));
+                    FC_0_OUTPUTS * sizeof(typename decltype(ac_0)::OutputType));
         fc_1.propagate(buffer.ac_sqr_0_out, buffer.fc_1_out);
         ac_1.propagate(buffer.fc_1_out, buffer.ac_1_out);
         fc_2.propagate(buffer.ac_1_out, buffer.fc_2_out);
@@ -116,13 +133,33 @@ struct Network {
         // buffer.fc_0_out[FC_0_OUTPUTS] is such that 1.0 is equal to 127*(1<<WeightScaleBits) in
         // quantized form, but we want 1.0 to be equal to 600*OutputScale
         std::int32_t fwdOut =
-          int(buffer.fc_0_out[FC_0_OUTPUTS]) * (600 * OutputScale) / (127 * (1 << WeightScaleBits));
+          (buffer.fc_0_out[FC_0_OUTPUTS]) * (600 * OutputScale) / (127 * (1 << WeightScaleBits));
         std::int32_t outputValue = buffer.fc_2_out[0] + fwdOut;
 
         return outputValue;
     }
+
+    std::size_t get_content_hash() const {
+        std::size_t h = 0;
+        hash_combine(h, fc_0.get_content_hash());
+        hash_combine(h, ac_sqr_0.get_content_hash());
+        hash_combine(h, ac_0.get_content_hash());
+        hash_combine(h, fc_1.get_content_hash());
+        hash_combine(h, ac_1.get_content_hash());
+        hash_combine(h, fc_2.get_content_hash());
+        hash_combine(h, get_hash_value());
+        return h;
+    }
 };
 
 }  // namespace Stockfish::Eval::NNUE
+
+template<Stockfish::Eval::NNUE::IndexType L1, int L2, int L3>
+struct std::hash<Stockfish::Eval::NNUE::NetworkArchitecture<L1, L2, L3>> {
+    std::size_t
+    operator()(const Stockfish::Eval::NNUE::NetworkArchitecture<L1, L2, L3>& arch) const noexcept {
+        return arch.get_content_hash();
+    }
+};
 
 #endif  // #ifndef NNUE_ARCHITECTURE_H_INCLUDED

@@ -1,6 +1,6 @@
 /*
   Stockfish, a UCI chess playing engine derived from Glaurung 2.1
-  Copyright (C) 2004-2023 The Stockfish developers (see AUTHORS file)
+  Copyright (C) 2004-2026 The Stockfish developers (see AUTHORS file)
 
   Stockfish is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -37,7 +37,10 @@
 //               | only in 64-bit mode and requires hardware with pext support.
 
     #include <cassert>
+    #include <cstddef>
     #include <cstdint>
+    #include <type_traits>
+    #include "misc.h"
 
     #if defined(_MSC_VER)
         // Disable some silly and noisy warnings from MSVC compiler
@@ -55,9 +58,15 @@
 // _WIN32                  Building on Windows (any)
 // _WIN64                  Building on Windows 64 bit
 
-    #if defined(__GNUC__) && (__GNUC__ < 9 || (__GNUC__ == 9 && __GNUC_MINOR__ <= 2)) \
-      && defined(_WIN32) && !defined(__clang__)
-        #define ALIGNAS_ON_STACK_VARIABLES_BROKEN
+// Enforce minimum GCC version
+    #if defined(__GNUC__) && !defined(__clang__) \
+      && (__GNUC__ < 9 || (__GNUC__ == 9 && __GNUC_MINOR__ < 3))
+        #error "Stockfish requires GCC 9.3 or later for correct compilation"
+    #endif
+
+    // Enforce minimum Clang version
+    #if defined(__clang__) && (__clang_major__ < 10)
+        #error "Stockfish requires Clang 10.0 or later for correct compilation"
     #endif
 
     #define ASSERT_ALIGNED(ptr, alignment) assert(reinterpret_cast<uintptr_t>(ptr) % alignment == 0)
@@ -108,37 +117,13 @@ using Bitboard = uint64_t;
 constexpr int MAX_MOVES = 256;
 constexpr int MAX_PLY   = 246;
 
-// A move needs 16 bits to be stored
-//
-// bit  0- 5: destination square (from 0 to 63)
-// bit  6-11: origin square (from 0 to 63)
-// bit 12-13: promotion piece type - 2 (from KNIGHT-2 to QUEEN-2)
-// bit 14-15: special move flag: promotion (1), en passant (2), castling (3)
-// NOTE: en passant bit is set only when a pawn can be captured
-//
-// Special cases are MOVE_NONE and MOVE_NULL. We can sneak these in because in
-// any normal move destination square is always different from origin square
-// while MOVE_NONE and MOVE_NULL have the same origin and destination square.
-
-enum Move : int {
-    MOVE_NONE,
-    MOVE_NULL = 65
-};
-
-enum MoveType {
-    NORMAL,
-    PROMOTION  = 1 << 14,
-    EN_PASSANT = 2 << 14,
-    CASTLING   = 3 << 14
-};
-
-enum Color {
+enum Color : uint8_t {
     WHITE,
     BLACK,
     COLOR_NB = 2
 };
 
-enum CastlingRights {
+enum CastlingRights : uint8_t {
     NO_CASTLING,
     WHITE_OO,
     WHITE_OOO = WHITE_OO << 1,
@@ -154,45 +139,64 @@ enum CastlingRights {
     CASTLING_RIGHT_NB = 16
 };
 
-enum Bound {
+enum Bound : uint8_t {
     BOUND_NONE,
     BOUND_UPPER,
     BOUND_LOWER,
     BOUND_EXACT = BOUND_UPPER | BOUND_LOWER
 };
 
-enum Value : int {
-    VALUE_ZERO     = 0,
-    VALUE_DRAW     = 0,
-    VALUE_NONE     = 32002,
-    VALUE_INFINITE = 32001,
+// Value is used as an alias for int, this is done to differentiate between a search
+// value and any other integer value. The values used in search are always supposed
+// to be in the range (-VALUE_NONE, VALUE_NONE] and should not exceed this range.
+using Value = int;
 
-    VALUE_MATE             = 32000,
-    VALUE_MATE_IN_MAX_PLY  = VALUE_MATE - MAX_PLY,
-    VALUE_MATED_IN_MAX_PLY = -VALUE_MATE_IN_MAX_PLY,
+constexpr Value VALUE_ZERO     = 0;
+constexpr Value VALUE_DRAW     = 0;
+constexpr Value VALUE_NONE     = 32002;
+constexpr Value VALUE_INFINITE = 32001;
 
-    VALUE_TB                 = VALUE_MATE_IN_MAX_PLY - 1,
-    VALUE_TB_WIN_IN_MAX_PLY  = VALUE_TB - MAX_PLY,
-    VALUE_TB_LOSS_IN_MAX_PLY = -VALUE_TB_WIN_IN_MAX_PLY,
+constexpr Value VALUE_MATE             = 32000;
+constexpr Value VALUE_MATE_IN_MAX_PLY  = VALUE_MATE - MAX_PLY;
+constexpr Value VALUE_MATED_IN_MAX_PLY = -VALUE_MATE_IN_MAX_PLY;
 
-    // In the code, we make the assumption that these values
-    // are such that non_pawn_material() can be used to uniquely
-    // identify the material on the board.
-    PawnValue   = 208,
-    KnightValue = 781,
-    BishopValue = 825,
-    RookValue   = 1276,
-    QueenValue  = 2538,
-};
+constexpr Value VALUE_TB                 = VALUE_MATE_IN_MAX_PLY - 1;
+constexpr Value VALUE_TB_WIN_IN_MAX_PLY  = VALUE_TB - MAX_PLY;
+constexpr Value VALUE_TB_LOSS_IN_MAX_PLY = -VALUE_TB_WIN_IN_MAX_PLY;
+
+
+constexpr bool is_valid(Value value) { return value != VALUE_NONE; }
+
+constexpr bool is_win(Value value) {
+    assert(is_valid(value));
+    return value >= VALUE_TB_WIN_IN_MAX_PLY;
+}
+
+constexpr bool is_loss(Value value) {
+    assert(is_valid(value));
+    return value <= VALUE_TB_LOSS_IN_MAX_PLY;
+}
+
+constexpr bool is_decisive(Value value) { return is_win(value) || is_loss(value); }
+
+// In the code, we make the assumption that these values
+// are such that non_pawn_material() can be used to uniquely
+// identify the material on the board.
+constexpr Value PawnValue   = 208;
+constexpr Value KnightValue = 781;
+constexpr Value BishopValue = 825;
+constexpr Value RookValue   = 1276;
+constexpr Value QueenValue  = 2538;
+
 
 // clang-format off
-enum PieceType {
+enum PieceType : std::uint8_t {
     NO_PIECE_TYPE, PAWN, KNIGHT, BISHOP, ROOK, QUEEN, KING,
     ALL_PIECES = 0,
     PIECE_TYPE_NB = 8
 };
 
-enum Piece {
+enum Piece : std::uint8_t {
     NO_PIECE,
     W_PAWN = PAWN,     W_KNIGHT, W_BISHOP, W_ROOK, W_QUEEN, W_KING,
     B_PAWN = PAWN + 8, B_KNIGHT, B_BISHOP, B_ROOK, B_QUEEN, B_KING,
@@ -206,17 +210,24 @@ constexpr Value PieceValue[PIECE_NB] = {
 
 using Depth = int;
 
-enum : int {
-    DEPTH_QS_CHECKS    = 0,
-    DEPTH_QS_NO_CHECKS = -1,
-
-    DEPTH_NONE = -6,
-
-    DEPTH_OFFSET = -7  // value used only for TT entry occupancy check
-};
+// The following DEPTH_ constants are used for transposition table entries
+// and quiescence search move generation stages. In regular search, the
+// depth stored in the transposition table is literal: the search depth
+// (effort) used to make the corresponding transposition table value. In
+// quiescence search, however, the transposition table entries only store
+// the current quiescence move generation stage (which should thus compare
+// lower than any regular search depth).
+constexpr Depth DEPTH_QS = 0;
+// For transposition table entries where no searching at all was done
+// (whether regular or qsearch) we use DEPTH_UNSEARCHED, which should thus
+// compare lower than any quiescence or regular depth. DEPTH_ENTRY_OFFSET
+// is used only for the transposition table entry occupancy check (see tt.cpp),
+// and should thus be lower than DEPTH_UNSEARCHED.
+constexpr Depth DEPTH_UNSEARCHED   = -2;
+constexpr Depth DEPTH_ENTRY_OFFSET = -3;
 
 // clang-format off
-enum Square : int {
+enum Square : uint8_t {
     SQ_A1, SQ_B1, SQ_C1, SQ_D1, SQ_E1, SQ_F1, SQ_G1, SQ_H1,
     SQ_A2, SQ_B2, SQ_C2, SQ_D2, SQ_E2, SQ_F2, SQ_G2, SQ_H2,
     SQ_A3, SQ_B3, SQ_C3, SQ_D3, SQ_E3, SQ_F3, SQ_G3, SQ_H3,
@@ -232,7 +243,7 @@ enum Square : int {
 };
 // clang-format on
 
-enum Direction : int {
+enum Direction : int8_t {
     NORTH = 8,
     EAST  = 1,
     SOUTH = -NORTH,
@@ -244,7 +255,7 @@ enum Direction : int {
     NORTH_WEST = NORTH + WEST
 };
 
-enum File : int {
+enum File : uint8_t {
     FILE_A,
     FILE_B,
     FILE_C,
@@ -256,7 +267,7 @@ enum File : int {
     FILE_NB
 };
 
-enum Rank : int {
+enum Rank : uint8_t {
     RANK_1,
     RANK_2,
     RANK_3,
@@ -270,57 +281,78 @@ enum Rank : int {
 
 // Keep track of what a move changes on the board (used by NNUE)
 struct DirtyPiece {
+    Piece  pc;        // this is never allowed to be NO_PIECE
+    Square from, to;  // to should be SQ_NONE for promotions
 
-    // Number of changed pieces
-    int dirty_num;
-
-    // Max 3 pieces can change in one move. A promotion with capture moves
-    // both the pawn and the captured piece to SQ_NONE and the piece promoted
-    // to from SQ_NONE to the capture square.
-    Piece piece[3];
-
-    // From and to squares, which may be SQ_NONE
-    Square from[3];
-    Square to[3];
+    // if {add,remove}_sq is SQ_NONE, {add,remove}_pc is allowed to be
+    // uninitialized
+    // castling uses add_sq and remove_sq to remove and add the rook
+    Square remove_sq, add_sq;
+    Piece  remove_pc, add_pc;
 };
 
-    #define ENABLE_BASE_OPERATORS_ON(T) \
-        constexpr T operator+(T d1, int d2) { return T(int(d1) + d2); } \
-        constexpr T operator-(T d1, int d2) { return T(int(d1) - d2); } \
-        constexpr T operator-(T d) { return T(-int(d)); } \
-        inline T&   operator+=(T& d1, int d2) { return d1 = d1 + d2; } \
-        inline T&   operator-=(T& d1, int d2) { return d1 = d1 - d2; }
+// Keep track of what threats change on the board (used by NNUE)
+struct DirtyThreat {
+    static constexpr int PcSqOffset         = 0;
+    static constexpr int ThreatenedSqOffset = 8;
+    static constexpr int ThreatenedPcOffset = 16;
+    static constexpr int PcOffset           = 20;
+
+    DirtyThreat() { /* don't initialize data */ }
+    DirtyThreat(uint32_t raw) :
+        data(raw) {}
+    DirtyThreat(Piece pc, Piece threatened_pc, Square pc_sq, Square threatened_sq, bool add) {
+        data = (uint32_t(add) << 31) | (pc << PcOffset) | (threatened_pc << ThreatenedPcOffset)
+             | (threatened_sq << ThreatenedSqOffset) | (pc_sq << PcSqOffset);
+    }
+
+    Piece  pc() const { return static_cast<Piece>(data >> PcOffset & 0xf); }
+    Piece  threatened_pc() const { return static_cast<Piece>(data >> ThreatenedPcOffset & 0xf); }
+    Square threatened_sq() const { return static_cast<Square>(data >> ThreatenedSqOffset & 0xff); }
+    Square pc_sq() const { return static_cast<Square>(data >> PcSqOffset & 0xff); }
+    bool   add() const { return data >> 31; }
+    uint32_t raw() const { return data; }
+
+   private:
+    uint32_t data;
+};
+
+// A piece can be involved in at most 8 outgoing attacks and 16 incoming attacks.
+// Moving a piece also can reveal at most 8 discovered attacks.
+// This implies that a non-castling move can change at most (8 + 16) * 3 + 8 = 80 features.
+// By similar logic, a castling move can change at most (5 + 1 + 3 + 9) * 2 = 36 features.
+// Thus, 80 should work as an upper bound. Finally, 16 entries are added to accommodate
+// unmasked vector stores near the end of the list.
+
+using DirtyThreatList = ValueList<DirtyThreat, 96>;
+
+struct DirtyThreats {
+    DirtyThreatList list;
+    Color           us;
+    Square          prevKsq, ksq;
+
+    Bitboard threatenedSqs, threateningSqs;
+};
 
     #define ENABLE_INCR_OPERATORS_ON(T) \
-        inline T& operator++(T& d) { return d = T(int(d) + 1); } \
-        inline T& operator--(T& d) { return d = T(int(d) - 1); }
-
-    #define ENABLE_FULL_OPERATORS_ON(T) \
-        ENABLE_BASE_OPERATORS_ON(T) \
-        constexpr T   operator*(int i, T d) { return T(i * int(d)); } \
-        constexpr T   operator*(T d, int i) { return T(int(d) * i); } \
-        constexpr T   operator/(T d, int i) { return T(int(d) / i); } \
-        constexpr int operator/(T d1, T d2) { return int(d1) / int(d2); } \
-        inline T&     operator*=(T& d, int i) { return d = T(int(d) * i); } \
-        inline T&     operator/=(T& d, int i) { return d = T(int(d) / i); }
-
-ENABLE_FULL_OPERATORS_ON(Value)
-ENABLE_FULL_OPERATORS_ON(Direction)
+        constexpr T& operator++(T& d) { return d = T(int(d) + 1); } \
+        constexpr T& operator--(T& d) { return d = T(int(d) - 1); }
 
 ENABLE_INCR_OPERATORS_ON(PieceType)
 ENABLE_INCR_OPERATORS_ON(Square)
 ENABLE_INCR_OPERATORS_ON(File)
 ENABLE_INCR_OPERATORS_ON(Rank)
 
-    #undef ENABLE_FULL_OPERATORS_ON
     #undef ENABLE_INCR_OPERATORS_ON
-    #undef ENABLE_BASE_OPERATORS_ON
+
+constexpr Direction operator+(Direction d1, Direction d2) { return Direction(int(d1) + int(d2)); }
+constexpr Direction operator*(int i, Direction d) { return Direction(i * int(d)); }
 
 // Additional operators to add a Direction to a Square
-constexpr Square operator+(Square s, Direction d) { return Square(int(s) + int(d)); }
-constexpr Square operator-(Square s, Direction d) { return Square(int(s) - int(d)); }
-inline Square&   operator+=(Square& s, Direction d) { return s = s + d; }
-inline Square&   operator-=(Square& s, Direction d) { return s = s - d; }
+constexpr Square  operator+(Square s, Direction d) { return Square(int(s) + int(d)); }
+constexpr Square  operator-(Square s, Direction d) { return Square(int(s) - int(d)); }
+constexpr Square& operator+=(Square& s, Direction d) { return s = s + d; }
+constexpr Square& operator-=(Square& s, Direction d) { return s = s - d; }
 
 // Toggle color
 constexpr Color operator~(Color c) { return Color(c ^ BLACK); }
@@ -348,12 +380,10 @@ constexpr Piece make_piece(Color c, PieceType pt) { return Piece((c << 3) + pt);
 
 constexpr PieceType type_of(Piece pc) { return PieceType(pc & 7); }
 
-inline Color color_of(Piece pc) {
+constexpr Color color_of(Piece pc) {
     assert(pc != NO_PIECE);
     return Color(pc >> 3);
 }
-
-constexpr bool is_ok(Move m) { return m != MOVE_NONE && m != MOVE_NULL; }
 
 constexpr bool is_ok(Square s) { return s >= SQ_A1 && s <= SQ_H8; }
 
@@ -369,33 +399,91 @@ constexpr Rank relative_rank(Color c, Square s) { return relative_rank(c, rank_o
 
 constexpr Direction pawn_push(Color c) { return c == WHITE ? NORTH : SOUTH; }
 
-constexpr Square from_sq(Move m) {
-    assert(is_ok(m));
-    return Square((m >> 6) & 0x3F);
-}
-
-constexpr Square to_sq(Move m) {
-    assert(is_ok(m));
-    return Square(m & 0x3F);
-}
-
-constexpr int from_to(Move m) { return m & 0xFFF; }
-
-constexpr MoveType type_of(Move m) { return MoveType(m & (3 << 14)); }
-
-constexpr PieceType promotion_type(Move m) { return PieceType(((m >> 12) & 3) + KNIGHT); }
-
-constexpr Move make_move(Square from, Square to) { return Move((from << 6) + to); }
-
-template<MoveType T>
-constexpr Move make(Square from, Square to, PieceType pt = KNIGHT) {
-    return Move(T + ((pt - KNIGHT) << 12) + (from << 6) + to);
-}
 
 // Based on a congruential pseudo-random number generator
 constexpr Key make_key(uint64_t seed) {
     return seed * 6364136223846793005ULL + 1442695040888963407ULL;
 }
+
+
+enum MoveType : uint16_t {
+    NORMAL,
+    PROMOTION  = 1 << 14,
+    EN_PASSANT = 2 << 14,
+    CASTLING   = 3 << 14
+};
+
+// A move needs 16 bits to be stored
+//
+// bit  0- 5: destination square (from 0 to 63)
+// bit  6-11: origin square (from 0 to 63)
+// bit 12-13: promotion piece type - 2 (from KNIGHT-2 to QUEEN-2)
+// bit 14-15: special move flag: promotion (1), en passant (2), castling (3)
+// NOTE: en passant bit is set only when a pawn can be captured
+//
+// Special cases are Move::none() and Move::null(). We can sneak these in because
+// in any normal move the destination square and origin square are always different,
+// but Move::none() and Move::null() have the same origin and destination square.
+
+class Move {
+   public:
+    Move() = default;
+    constexpr explicit Move(std::uint16_t d) :
+        data(d) {}
+
+    constexpr Move(Square from, Square to) :
+        data((from << 6) + to) {}
+
+    template<MoveType T>
+    static constexpr Move make(Square from, Square to, PieceType pt = KNIGHT) {
+        return Move(T + ((pt - KNIGHT) << 12) + (from << 6) + to);
+    }
+
+    constexpr Square from_sq() const {
+        assert(is_ok());
+        return Square((data >> 6) & 0x3F);
+    }
+
+    constexpr Square to_sq() const {
+        assert(is_ok());
+        return Square(data & 0x3F);
+    }
+
+    // Same as to_sq() but without assertion, for branchless code paths
+    // where the result is masked/ignored when move is not ok
+    constexpr Square to_sq_unchecked() const { return Square(data & 0x3F); }
+
+    constexpr MoveType type_of() const { return MoveType(data & (3 << 14)); }
+
+    constexpr PieceType promotion_type() const { return PieceType(((data >> 12) & 3) + KNIGHT); }
+
+    constexpr bool is_ok() const { return none().data != data && null().data != data; }
+
+    static constexpr Move null() { return Move(65); }
+    static constexpr Move none() { return Move(0); }
+
+    constexpr bool operator==(const Move& m) const { return data == m.data; }
+    constexpr bool operator!=(const Move& m) const { return data != m.data; }
+
+    constexpr explicit operator bool() const { return data != 0; }
+
+    constexpr std::uint16_t raw() const { return data; }
+
+    struct MoveHash {
+        std::size_t operator()(const Move& m) const { return make_key(m.data); }
+    };
+
+   protected:
+    std::uint16_t data;
+};
+
+template<typename T, typename... Ts>
+struct is_all_same {
+    static constexpr bool value = (std::is_same_v<T, Ts> && ...);
+};
+
+template<typename... Ts>
+constexpr auto is_all_same_v = is_all_same<Ts...>::value;
 
 }  // namespace Stockfish
 
